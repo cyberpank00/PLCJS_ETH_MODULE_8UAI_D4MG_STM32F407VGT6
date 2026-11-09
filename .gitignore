@@ -1,0 +1,13 @@
+# Build output
+build/
+
+# IDE / editor
+.vscode/
+.cache/
+
+# Python
+__pycache__/
+*.pyc
+
+# Stale pre-init copy of the 4RTD repository (local only)
+.git_old_4rtd_copy/

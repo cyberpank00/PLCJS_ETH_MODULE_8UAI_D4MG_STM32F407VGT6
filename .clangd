@@ -1,0 +1,23 @@
+Diagnostics:
+  UnusedIncludes: None
+  MissingIncludes: None
+CompileFlags:
+  CompilationDatabase: build/Debug
+  # Index this ARM (Cortex-M4F) firmware with the STM32CubeCLT
+  # arm-none-eabi-gcc cross compiler instead of clangd's bundled host clang.
+  # clangd then infers the `arm-none-eabi` target, so the Cortex-M machine
+  # flags in compile_commands.json (-mcpu / -mfpu / -mfloat-abi) are understood
+  # and no longer reported as "unsupported option ... for target x86_64-...".
+  #
+  # Resolved via PATH; on a machine with STM32CubeCLT installed this is its
+  # GNU-tools-for-STM32/bin/arm-none-eabi-gcc(.exe). Replace with an absolute
+  # path if it is not on PATH, e.g.:
+  #   C:/ST/STM32CubeCLT_1.21.0/GNU-tools-for-STM32/bin/arm-none-eabi-gcc.exe
+  # To also let clangd pull the compiler's system includes (<stdint.h>, ...)
+  # add to the editor's clangd arguments:
+  #   --query-driver=**/arm-none-eabi-gcc*
+  Compiler: arm-none-eabi-gcc
+  Remove:
+    # GCC-only flags that clang's parser does not recognise.
+    - -fstack-usage
+    - -ftls-model=*
