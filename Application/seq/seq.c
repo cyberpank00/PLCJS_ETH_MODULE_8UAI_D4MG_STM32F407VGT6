@@ -310,9 +310,11 @@ RAMF void DMA2_Stream0_IRQHandler(void)
     if (lost && in_win) { ph->valid = 0u; s_lost++; }
 
     /* 1. Key rewrite (every slot: refreshes latches, applies changes). The
-     *    samples of this slot were taken with the previous combination. */
+     *    samples of this slot were taken with the previous combination — or
+     *    with every key open, if a trip forced nOE = 1 before this slot. */
     uint8_t prev[AI_CHANNELS];
     for (uint8_t ch = 0u; ch < AI_CHANNELS; ch++) { prev[ch] = s_live[ch]; }
+    const bool noe_slot = (s_noe_restore != 0u);
     if (TIM2->CNT < KEYS_WRITE_LATEST) {
         uint8_t bad;
         const uint32_t w = keys_build(s_combo, &bad);
@@ -325,6 +327,11 @@ RAMF void DMA2_Stream0_IRQHandler(void)
         if (s_noe_restore) {
             gpio_write(BOARD_SIG_NOE, 0u);
             s_noe_restore = 0u;
+            /* Every key that is on now turned on again: give all of them the
+             * transient allowance. */
+            for (uint8_t ch = 0u; ch < AI_CHANNELS; ch++) {
+                if (s_live[ch] != 0u) { s_settle[ch] = SETTLE_SLOTS; }
+            }
         }
     }
 
@@ -334,7 +341,11 @@ RAMF void DMA2_Stream0_IRQHandler(void)
             const uint8_t  ch   = s_list[i];
             const uint16_t code = s_rx[2u * i + 1u];
             if (code == 0x0000u || code == 0xFFFFu) { ph->clip[ch]++; }
-            check_sample(ch, prev[ch], code);
+            /* Taken with all keys open (nOE forced): not a measurement of the
+             * live combination — checking it would cascade trips onto other
+             * channels. The phase is already invalid. */
+            if (noe_slot) { s_prev[ch] = code; }
+            else          { check_sample(ch, prev[ch], code); }
             if (in_win) {
                 ph->sum[ch] += code;
                 ph->count[ch]++;
