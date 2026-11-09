@@ -1,176 +1,111 @@
-# PLCJS_ETH_MODULE_8AIC_D4MG_STM32F407VGT6
+# PLCJS_ETH_MODULE_8UAI_D4MG_STM32F407VGT6
 
-<p align="center">
-  <img src="DOC/MAIN_BOARD.png" alt="PLCJS Ethernet 8AIC board (HW1.1)" width="600">
-</p>
+Firmware for the PLCJS Ethernet module with 8 universal analog inputs
+(`STM32F407VGT6`). Per channel: voltage 0–10 / 2–10 V, current 0–20 / 4–20 mA,
+Pt1000, KTY or a user RTD table, NTC, or a resistive digital input.
 
-<p align="center"><strong>8AIC module board, HW1.1</strong></p>
+One isolated 16-bit SAR ADC `ADS8688` measures all channels; three keys per
+channel (Q1 excitation, Q2 100 Ω shunt, PD 1 MΩ pull-down) set the mode, driven
+by a `TPIC6C595 ×2 + 74HC595` chain on the same SPI bus. Values are published
+over `Modbus TCP`; settings live in Flash; factory reset and the Ethernet
+bootloader (OTA) are supported.
 
-Firmware for the PLCJS Ethernet module with 8 analog current inputs
-(4–20 mA / 0–20 mA), based on `STM32F407VGT6`.
-
-Eight channels are measured through two isolated 24-bit `ADS1220` ADCs (four
-single-ended inputs each via the internal multiplexer), published over
-`Modbus TCP`; settings live in internal Flash, calibration in a separate
-write-once Flash sector. Main `STAT_LED` plus eight per-channel LEDs, factory
-reset, OTA via the Ethernet bootloader. Infrastructure (network, Modbus,
-settings, LED, bootloader, ADS1220 driver, write-once calibration) is
-inherited from the `4RTD` HW2.1 variant.
+Sources: `DOC/SpecifyDesign/8UI_TZ_firmware.md` ("8UI rev. 6") and
+`DOC/SCH_MAIN_BOARD_8UAI.pdf` (beta, 09.11.2026). Network, Modbus server, PDP
+discovery, ARP probe, KSZ8863, LED, button and bootloader/OTA come from `8AIC`
+fw 1.6; the analog path is new.
 
 ## Hardware
 
-- MCU `STM32F407VGT6`; Ethernet `KSZ8863` (RMII).
-- 2× `ADS1220`, isolated (CA-IS3xxx), DRDY wired; `REF5020` 2.048 V reference
-  on REFP0/REFN0.
-- Input: 0.1 A fuse → shunt **91 Ω 1206** (firmware nominal 89.9 Ω,
-  calibrated) → 1 kΩ + 100 nF → AINx; BAV99 clamps, SMAJ24CA TVS.
-
-Pinout: SPI1 SCLK=PA5, MISO=PA6, MOSI=PB5. ADC0_CS=PA9, ADC1_CS=PD8,
-ADC0_DRDY=PD10, ADC1_DRDY=PD9. Channel LEDs AI0..7 = PB15, PB14, PB10, PE15,
-PE14, PE13, PE12, PE11. STAT_LED=PE9, FACT_RES=PE10, ETHRST=PD11, ETHINT=PB1.
-ADC0 serves AI0..AI3, ADC1 AI4..AI7. SPI mode 1, ~2.6 MHz.
-
-### ADS1220 configuration
-
-| Reg | Value | Fields |
-|---|---|---|
-| 0 | `0x81 \| mux<<4` | MUX AINx/AVSS, gain 1, PGA bypass |
-| 1 | `DR<<5` | 20/90/330 SPS, normal, single-shot |
-| 2 | `0x50` / `0x40` | ext ref REFP0/REFN0, 50+60 Hz FIR (20 SPS only), IDAC off |
-| 3 | `0x00` | — |
-
-Per mux input: WREG MUX → START on both chips → wait DRDY → RDATA. A full
-8-channel scan is four conversions (~210 ms at 20 SPS, ~50 ms at 90 SPS,
-~16 ms at 330 SPS).
-
-```
-I_raw = code / 2^23 × V_REF / R_shunt        (20 mA ≈ 1.8 V ≈ 88 % FS)
-I     = gain × I_raw + offset                 (per-channel calibration)
-```
-
-Channel LED: solid = active, off = disabled, fast blink (5 Hz) = fault (open
-loop < 3.6 mA on live-zero scales, over-range > 21 mA / saturated ADC, ADC not
-responding).
-
-## Channel scale and fault detection
-
-Each channel's scale is two thresholds in µA — low (`8 + ch`, default 4000)
-and high (`16 + ch`, default 20000). The int16 reading (`0 + ch`) is scaled
-automatically: low → `0`, high → `32767`, negative below low. For a 0–20 mA
-scale write low = `0`.
-
-| Condition | Fault |
+| Block | Description |
 |---|---|
-| low threshold ≥ 3600 µA **and** `I < 3.6 mA` | open loop (code 1) |
-| `I > 21 mA` or saturated ADC | over-range (code 2) |
-| no DRDY / config readback mismatch | ADC not responding (code 3) |
+| MCU | `STM32F407VGT6` at **160 MHz** (APB2 80 MHz → SPI exactly 10 MHz) |
+| ADC | `ADS8688`, manual channel selection, 4.096 V reference |
+| Keys | U11 `TPIC6C595` (Q1), U12 `TPIC6C595` (PD), U13 `74HC595` (Q2); `/OE` = nOE OR `MCP101` supervisor |
+| Watchdog | `IWDG`: 8 s until the analog start-up, then 25 ms, refreshed only by the protection ISR |
 
-Fault limits are constants (`AIC_OPEN_MA`, `AIC_OVER_MA` in `aic_module.h`).
-Max measurable current at 89.9 Ω ≈ 22.8 mA.
+Pins (only in `Application/board/board_pins.h`): SPI1 PA5/PA6/PB5, CS_ADC PA9,
+nOE PA8, RCLK PC8, channel LEDs PB15 PB14 PB10 PE15..PE11. Inputs map to ADC
+channels `AI0..AI7 → 5,4,3,2,0,1,7,6`.
 
-## Calibration
+## Modes
 
-Per-channel linear model `I = gain·I_raw + offset` fitted over ≥ 2 points from
-a precision current source (tools in `tools/`). Accuracy budget over
-−20…+70 °C after calibration at ~25 °C: shunt 25 ppm/°C 0.113 %, shunt
-self-heating 0.023 %, REF5020 0.014 %, ADC/divider ~0.01 % → ≈ 0.16 % worst
-case (RSS ≈ 0.12 %). The shunt must be thin-film, 0.1 %, ≤ 25 ppm/°C, 1206.
+| Code | Mode | ADC range | Phase A (Q1 Q2 PD) | Phase B | Result |
+|---:|---|---|---|---|---|
+| 0 | OFF | — | 000 | 000 | not sampled |
+| 1 | V 0–10 | 0..10.24 V | 001 | 001 | V |
+| 2 | V 2–10 | 0..10.24 V | 001 | 001 | V, open < 1.8 V |
+| 3 | I 0–20 | ±2.56 V | 010 | 010 | mA |
+| 4 | I 4–20 | ±2.56 V | 010 | 010 | mA, open < 3.6 mA |
+| 5 | PT1000 | ±2.56 V | 100 "on" | 010 "zero" | °C (IEC 60751) |
+| 6 | KTY | ±2.56 V | 100 | 010 | °C, table |
+| 7 | RTD table | ±2.56 V | 100 | 010 | °C, table |
+| 8 | NTC | ±5.12 V | 100 | 010 | °C (B or Steinhart-Hart) |
+| 9 | DI | 0..5.12 V | 100 | 100 | 0/1, 1 / 5 kΩ with hysteresis |
 
-### Write-once
+## Acquisition and protection
 
-Flash sector 11, never erased in normal operation. Each of the 8 channel slots
-commits **exactly once**: write `gain`/`offset` to `540 + ch×4` (live
-preview) → write `0xCA00 | ch` to register `131` (**CAL COMMIT**). Lock
-status: input register `127` (bit = channel). Emergency erase: `0xC1A5` to
-register `132`, then hold `FACT_RES` ~3 s within 30 s.
+40 µs slots (TIM2); per slot TIM8 + DMA2 run one 4 µs ADC frame per active
+channel, then the protection ISR rewrites the 24 key bits + RCLK. A phase is a
+13-slot key step (000 → ≥ 0.5 ms → new combination) + `T_BLANK` (1.5 ms) + an
+integration window of exactly 20.000 ms (50 Hz) or 16.68 ms (60 Hz); 500
+samples per channel per phase with 8 channels.
 
-## Modbus register map
+Every sample is checked in the priority-0 ISR against limits precomputed as
+ADC codes: current > 25 mA (OVERLOAD), shunt current > 1 mA in the "zero" phase,
+V_n > V_REF + 50 mV or full scale with Q1 on (EXT_VOLTAGE). A trip sets nOE = 1
+at once, clears the key, rewrites the chain and releases nOE. Retry after 1 s
+(Q1 modes through PRECHECK), LOCKED after 3 trips in a row, counter reset after
+60 s. The ISR, the vector table and the Flash writer run from RAM, so
+protection keeps working while a settings save erases Flash.
 
-Floats are float32, **high word first**. Multi-channel quantities are grouped
-by quantity: 8 consecutive registers (or pairs) = channels 0..7.
+## Modbus map
 
-### Compact block — Holding Registers (FC03/06/16), 0..47
+The full map is the header comment of `Application/modbus/modbus_app.h`.
+float32 = 2 registers, high word first.
 
-| Reg | Description |
+- Holding `0..63` (group·8 + channel): int16 reading (0.1 °C / mV / µA / 0-1,
+  −32768 invalid), mode, filter ms, line mΩ, NTC model, DI on/off Ω, table points.
+- Holding `540 + ch·16`: Pt R0, NTC R25, NTC B, SH a/b/c, scale low/high.
+- Holding `1000 + ch·128`: RTD/KTY table R[32], t[32].
+- Holding `700..723` node model, `730..747` diagnostic thresholds, `133` mains
+  Hz, `134` T_BLANK µs, `131` commands (`0xA100|ch` UNLOCK, `0xA200|ch` RESTART,
+  `0xA300` APPLY).
+- Input `300..363`: value, raw, status, update counter, trips, state.
+- IR120 / IR121 firmware version major / minor (**1 / 1**), IR125 module id
+  `0x08A7`, IR127 module flags, IR128 samples per phase, IR129/130 save count /
+  result.
+
+Status bits: 0 NO_DATA, 1 OVERRANGE, 2 UNDERRANGE, 3 WIRE_BREAK, 4 SHORT,
+5 OVERLOAD, 6 EXT_VOLTAGE, 7 LOCKED, 8 NEG_INPUT, 9 ADC_CLIP, 10 OUT_OF_TABLE,
+11 CONFIG_ERR, 12 ADC_FAIL, 13 INTERNAL, 14 OFF; any bit but 1/2 → value NaN.
+
+## Image
+
+| Field | Value |
 |---|---|
-| 0..7 | **reading, int16 (RO)**: `0..32767` = `[low … high]` threshold of the channel, negative below low (clamped ±32767); disabled `0`; fault `−32768` |
-| 8..15 | scale low threshold, µA (default `4000`; 0..25000, < high) |
-| 16..23 | scale high threshold, µA (default `20000`; ≤ 25000, > low) |
-| 24..31 | enabled (0/1, default `1`) |
-| 32..39 | smoothing EMA (0 off, 1 = 1/4, 2 = 1/8, 3 = 1/16) |
-| 40..47 | reserved |
+| `product_id` | `0x504C0807` |
+| `hw_revision` | `0x0101` |
+| `fw_version` | `0x0101` (fw 1.1) |
 
-### Readings — Input Registers (FC04), 300..355
+Settings: sector 10 (`0x080C0000`), `SETTINGS_MAGIC = 0x08A74A57`, version 1.
+Sector 11 is unused.
 
-| Reg | Type | Description |
-|---|---|---|
-| 300..315 | float32 ×8 | current, mA (calibrated, smoothed); NaN on fault/disabled |
-| 316..331 | float32 ×8 | raw current, mA (calibration input) |
-| 332..339 | u16 ×8 | flags: bit0 enabled, bit1 valid, bit2 fault; bits15..8 fault code (1 open, 2 over, 3 ADC) |
-| 340..355 | int32 ×8 | 24-bit signed ADC code |
-
-Global: `120` fw major, `121` fw minor, `122/123` uptime s, `125` module id
-(`0x08AC`), `126` MCU temperature (signed 0.1 °C), `127` calibration lock mask,
-`129` successful settings saves since boot (Flash written and verified by read-back),
-`130` last save result (0 none, 1 OK, 2 failed).
-
-### Global settings — Holding Registers
-
-| Reg | Description |
-|---|---|
-| 100 | scan period, ms (50..5000) |
-| 101 | LED mode (0/1/2) |
-| 102 | Modbus slave id | 103 | Modbus TCP port |
-| 104..107 | static IP | 108..111 | netmask | 112..115 | gateway |
-| 116 | net mode: `0` static / `1` DHCP / `2` link-local (default `2`) |
-| 117 | SAVE (`0xA5A5`) | 118 | REBOOT (`0xB00B`) / BOOTLOADER (`0xB007`) / KSZ8863 reset (`0x8863`) |
-| 119 | FACTORY RESET (`0xDEAD`) | 130 | MCU temperature (RO) |
-| 131 | CAL COMMIT (`0xCA00 \| ch`) | 132 | CAL ERASE ARM (`0xC1A5`) |
-| 133 | **ADC rate**: `0` = 20 SPS + 50/60 Hz FIR (default), `1` = 90 SPS, `2` = 330 SPS |
-
-Calibration coefficients (float32), base `540 + ch×4`: `+0..1` gain,
-`+2..3` offset (mA). Nominals: `620..621` R_shunt Ω (89.9), `622..623`
-V_REF V (2.048).
-
-## Flash layout
-
-| Region | Address | Size | Purpose |
-|---|---:|---:|---|
-| Bootloader | `0x08000000` | 128 KB | sectors 0-4 |
-| Metadata | `0x08020000` | 128 KB | sector 5 |
-| Application | `0x08040000` | 256 KB | sectors 6-7 (this firmware) |
-| Staging | `0x08080000` | 256 KB | sectors 8-9 |
-| Settings | `0x080C0000` | 128 KB | sector 10 |
-| Calibration | `0x080E0000` | 128 KB | sector 11 (write-once) |
-
-`SETTINGS_MAGIC = 0x08AC4A57`, `SETTINGS_VERSION = 2`. Calibration: 8 slots,
-magic `0xCA11B08A`.
-
-## Build
+## Build and tests
 
 ```powershell
 cmake --preset Debug
 cmake --build --preset Debug
+cmake -S tests -B build/host-tests -G Ninja -DCMAKE_C_COMPILER=gcc
+cmake --build build/host-tests
+ctest --test-dir build/host-tests --output-on-failure
 ```
 
-Identity — `Application/fw_header/fw_header.h`: `FW_PRODUCT_ID=0x504C0804`,
-`FW_HW_REVISION=0x0101`, `FW_VERSION_VALUE=0x0106`.
+Flash via OTA, or for RMA/debug with the bootloader's
+`scripts/service_flash.ps1 -AppBin <app.bin>` (plain SWD flashing leaves the
+board in the bootloader because of the metadata CRC check).
 
-## Flashing
+## Status
 
-```powershell
-STM32_Programmer_CLI -c port=SWD -w build/Debug/PLCJS_ETH_MODULE_8AIC_D4MG_STM32F407VGT6.elf -v -rst
-```
-
-## Network defaults
-
-Net mode `2` = link-local (factory): `169.254.<mac[4]>.<mac[5]>` /16 from the
-UID, discoverable by MAC (UDP broadcast port `20556`). Static fallback: IP
-`192.168.1.10`, mask `255.255.255.0`, gateway `192.168.1.1`. Modbus TCP port
-`502`, unit id `1`.
-
-## Tools
-
-`tools/calibrate.mjs` (Node.js 18+) / `tools/calibrate.py` (Python 3.8+):
-status, configuration, calibration over Modbus TCP. See
-[tools/README.md](tools/README.md).
+Builds and passes the host tests. The hardware acceptance campaign (TZ
+section 12) has **not** been run yet.

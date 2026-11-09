@@ -1,300 +1,235 @@
 # AGENTS.md
 
-Firmware for the PLCJS Ethernet 8AIC module (8x 4–20 mA / 0–20 mA current
-inputs via two ADS1220, STM32F407VGT6, KSZ8863 switch, Modbus TCP). This file
-is the orientation map for agents; user-facing documentation lives in
-`README.md` / `README_EN.md`.
+Firmware for the PLCJS Ethernet 8UAI module (8 universal analog inputs:
+0–10 / 2–10 V, 0/4–20 mA, Pt1000, KTY / RTD table, NTC, DI; one `ADS8688` +
+a 24-bit `TPIC6C595 ×2 + 74HC595` key chain on one isolated SPI bus,
+STM32F407VGT6, KSZ8863 switch, Modbus TCP). This file is the orientation map
+for agents; user-facing documentation lives in `README.md` / `README_EN.md`.
 
-Derived from the 4RTD HW2.1 firmware (fw 2.0): the ADS1220 transport, the
-write-once calibration store, the compact "grouped by quantity" register map
-and every shared subsystem came from there; the acquisition module (`aic/`)
-is new.
+Specification: `DOC/SpecifyDesign/8UI_TZ_firmware.md` (TZ, "8UI rev. 6"),
+schematic `DOC/SCH_MAIN_BOARD_8UAI.pdf` + `DOC/SCH_LED_BOARD_8I.pdf`. TZ section
+numbers are quoted in the code comments.
+
+Derived from 8AIC fw 1.6 (commit `5dfdaf4` there): every shared subsystem
+(network, Modbus server, PDP discovery, ARP probe, KSZ8863, LED, button,
+fw_header, nanomodbus) came from there unchanged; the analog path is new.
 
 ## Build (CMake)
 
-Toolchain: STM32 Arm Clang (`starm-clang`) from STM32CubeCLT, generator Ninja.
-Toolchain file: `cmake/starm-clang.cmake`. Presets in `CMakePresets.json`.
+Toolchain: STM32 Arm Clang (`starm-clang`) from STM32CubeCLT, Ninja.
+Toolchain file `cmake/starm-clang.cmake`, presets in `CMakePresets.json`.
 
 ```
 cmake --preset Debug
 cmake --build --preset Debug
 ```
 
-Release: substitute `Release`. Build output:
-`build/<preset>/PLCJS_ETH_MODULE_8AIC_D4MG_STM32F407VGT6.{elf,hex,bin,map}`.
+Release: substitute `Release`. Output:
+`build/<preset>/PLCJS_ETH_MODULE_8UAI_D4MG_STM32F407VGT6.{elf,hex,bin,map}`.
 
-No host-side unit tests. "Verified" means it compiles, and where the change is
-observable it was exercised against hardware.
+Host tests (conversion maths + key builder) need a native gcc — on this
+workstation Qt's MinGW (`C:\Qt\Tools\mingw1310_64\bin`):
 
-### Tools required
-- CMake >= 3.22, Ninja
-- `starm-clang` (STM32CubeCLT) on PATH. Alternative GCC toolchain at
-  `cmake/gcc-arm-none-eabi.cmake`.
-- Node 18+ or Python for `tools/calibrate.mjs` / `tools/calibrate.py`.
+```
+cmake -S tests -B build/host-tests -G Ninja -DCMAKE_C_COMPILER=gcc
+cmake --build build/host-tests
+ctest --test-dir build/host-tests --output-on-failure
+```
+
+"Verified" without hardware means: both presets build warning-free, host tests
+pass, and the RAM check below is clean. The TZ section 12 acceptance campaign
+(oscilloscope, calibrators, 24 h run) is the only real verification.
+
+### RAM check after touching the ISR path
+Everything reachable from `DMA2_Stream0_IRQHandler` (and `ram_erase_program`)
+must live in RAM and must not touch Flash:
+
+```
+arm-none-eabi-objdump -d -j .data build/Release/<name>.elf > ram.dis
+# every bl/b.w target must be a RAM function; no ".word 0x080....." literals
+```
 
 ## Repository layout
 
 | Path | Owner | Notes |
 |---|---|---|
-| `Application/` | hand-written | All real logic. Edit here. |
+| `Application/` | hand-written | All real logic. |
 | `Core/`, `Drivers/`, `Middlewares/`, `LWIP/`, `cmake/stm32cubemx/` | STM32CubeMX | Regenerated from the `.ioc`. |
-| `startup_stm32f407xx.s`, `STM32F407XX_FLASH.ld` | hand-edited | Diverged from CubeMX output — see *Linker*. |
-| `tools/` | hand-written | Calibration helpers (`calibrate.mjs`, `calibrate.py`, own `README.md`). |
-| `DOC/` | assets | Schematic PDF, board photo (`MAIN_BOARD.png`, used by the READMEs). |
+| `startup_stm32f407xx.s`, `STM32F407XX_FLASH.ld` | hand-edited | See *Linker*. |
+| `tests/` | hand-written | Host tests (`test_ai.c`). |
+| `DOC/` | assets | TZ, design notes, schematics. |
 
-**CubeMX regeneration hazard.** Regenerating from the `.ioc` overwrites `Core/`,
-`Drivers/`, `Middlewares/`, `LWIP/` and `cmake/stm32cubemx/CMakeLists.txt`, some
-of which carry hand edits outside `USER CODE` guards (notably
-`LWIP/Target/ethernetif.c`, `lwipopts.h`, and the pin block in `Core/Inc/main.h`
-/ `Core/Src/gpio.c`, which was edited by hand and **not** regenerated for this
-board). Diff carefully afterwards.
+**CubeMX regeneration hazard.** Regeneration overwrites `Core/`, `LWIP/` etc.
+Hand edits outside `USER CODE` guards: `LWIP/Target/ethernetif.c`,
+`lwipopts.h`, the pin block of `Core/Inc/main.h` / `Core/Src/gpio.c` (analog
+pins removed — they belong to `board/`), `SystemClock_Config` (PLLN 320),
+`configTOTAL_HEAP_SIZE` 20480 (also in the `.ioc`). `board_early_pins()` sits in
+`USER CODE BEGIN 1` of `main()`.
 
 ## Module map (`Application/`)
 
 | Module | Responsibility |
 |---|---|
-| `app/` | Orchestrator: boot order, factory reset, network bring-up, housekeeping loop, acquisition task. Start here. |
-| `spi/` | SPI1 transport (mode 1) shared by both ADS1220. |
-| `ads1220/` | ADS1220 ×2 driver: reset/config, per-mux single-shot conversion synchronised on the DRDY pins, data-rate selection, liveness. Board wiring and register values are documented in its header. |
-| `aic/` | Acquisition + conversion: code → mA, per-channel calibration, fixed NAMUR-style fault thresholds, EMA smoothing, int16 reading scaled to per-channel lo/hi thresholds, channel LEDs. |
-| `calstore/` | **Write-once** per-channel calibration store in Flash (8 slots). Read this file before touching calibration. |
-| `temp/` | On-chip MCU temperature sensor, exposed as IR126 / HR130. |
-| `modbus/modbus_app.c` | Register-map adapter. **The map is documented in the header comment of `modbus_app.h`.** |
-| `modbus/modbus_tcp_server.c` | Multi-client (4 slots) TCP server on LwIP netconn; when full, the longest-silent client is evicted (newest-wins). |
-| `settings/` | Flash-backed settings, CRC32-protected. |
-| `discovery/` | PDP responder, UDP/20556 broadcast. |
-| `addr_probe/` | Non-blocking ARP address-in-use probe (3 probes + wait, lwIP timers), identical to the bootloader's copy. PDP `SET_NET` (static/link-local) is applied only after it; status 1 = address taken. **`LWIP/Target/ethernetif.c` must call `addr_probe_input(p)` for every received frame before `netif->input()`.** |
-| `net_id/` | MAC and link-local IPv4 derived from the 96-bit MCU UID. |
-| `ksz8863/` | SMI/MIIM driver for the Ethernet switch. |
-| `led/`, `button/` | STAT_LED state machine; FACT_RES button. |
-| `fw_header/` | Firmware image header consumed by the bootloader. Module identity. |
-| `third_party/nanomodbus/` | Vendored protocol library, locally patched (FC15/FC16 hardening). |
+| `app/` | Orchestrator: boot order, factory reset, network, housekeeping loop, AI and LED tasks. Start here. |
+| `board/board_pins.*` | **The only file with MCU pins** (TZ 1): SPI1, CS_ADC PA9, nOE PA8, RCLK PC8, channel LEDs, `BOARD_ADC_MAP`, `BOARD_KEY_MAP`. Checked against the schematic. |
+| `board/board_io.*` | Thin hardware layer: `gpio_write`, `spi_xfer`, `spi_set_mode`, one ADS8688 frame, key write + RCLK. RAM-resident. |
+| `ads8688/` | Command/register codes (checked against SBAS582C, see header), blocking start-up init + range read-back. |
+| `keys/` | Key shadow → 24-bit word, forbidden-combination check (host tested). RAM-resident. |
+| `seq/` | **Sequencer + protection ISR.** TIM2 slot clock, TIM8 + DMA2 frame engine, phase schedule, per-sample protection, watchdog refresh. Read `seq.h` first. |
+| `ai/ai_math.*` | Conversion maths, TZ 8: node model, CVD, NTC, tables, V/I/DI, diagnostics (host tested). |
+| `ai/ai.*` | Channel state machine, start-up (TZ 10), plans for the sequencer, published snapshot, LEDs. |
+| `ai/ai_types.h` | Shared types: modes, ranges, status bits, `ai_ch_cfg_t` (stored in Flash). |
+| `wdg/` | IWDG policy: 8 s at boot, 25 ms once the sequencer runs. |
+| `flash_ram/` | Sector erase/program from RAM inside a critical section. |
+| `settings/` | Flash-backed settings (sector 10), CRC32. |
+| `modbus/modbus_app.c` | Register map. **Documented in the header comment of `modbus_app.h`.** |
+| others | `discovery/`, `addr_probe/`, `net_id/`, `ksz8863/`, `led/`, `button/`, `temp/`, `fw_header/`, `third_party/nanomodbus/` — shared with the family, unchanged from 8AIC. |
 
-### Register map shape
-Multi-channel quantities are grouped **by quantity** (8 registers or 8 pairs =
-channels 0..7). `float32` is two registers, **high word first**.
+## Analog path in one page
 
-- Compact block (FC03/06/16) `0..47`: `0..7` int16 reading (RO, 0..32767 =
-  scale_lo..scale_hi of the channel, negative below), `8..15` scale low
-  threshold µA (default 4000), `16..23` scale high threshold µA (default
-  20000), `24..31` enabled (default 1), `32..39` EMA level, `40..47` reserved.
-  Disabled reads 0, fault reads −32768. Threshold writes are validated
-  against each other (lo < hi ≤ 25000 µA) — move `hi` first when raising
-  the whole span.
-- Readings (FC04) `300..355`: current f32 ×8, raw current f32 ×8, flags ×8
-  (fault code in bits 15..8: 1 open, 2 over-range, 3 ADC dead), ADC code
-  int32 ×8.
-- Calibration coefficients (FC03/06/16): `540 + ch*4` — gain, offset (mA).
-- Nominals: `620..621` R_shunt Ω, `622..623` V_REF V.
-- `HR133` ADC data rate (0 = 20 SPS + FIR, 1 = 90 SPS, 2 = 330 SPS).
-- `IR127` = calibration lock bitmask, bit = channel.
+- **Clock:** SYSCLK 160 MHz so SPI1 = PCLK2/8 = 10.0 MHz exactly (TZ 3: 10 MHz
+  ceiling from the isolator round trip). TIM2 = 80 MHz, TIM8 = 160 MHz.
+- **Slot (40 µs):** TIM2 TRGO starts TIM8 (one-pulse, RCR = n−1) → n frames of
+  4 µs. CC1 → DMA2 S2 writes CS low (BSRR), CC2 → S3 writes MAN_Ch of the next
+  frame to SPI DR, CC3 → S4 writes 0x0000, CC4 → S7 writes CS high; SPI RX →
+  S0 (ring 2n, TC once per slot). Frame i sends the command for frame i+1,
+  so the data of frame i belongs to `list[i]`.
+- **ISR (S0 TC, priority 0, RAM):** wait TIM8 stop → rewrite keys (mode 0,
+  only if `TIM2->CNT < KEYS_WRITE_LATEST`) → check every sample against the
+  guard of the combination that was live during the slot → sums in the window
+  → schedule → watchdog.
+- **Phase:** 13 slots key step + `T_BLANK` + 500 (50 Hz) / 417 (60 Hz) slots
+  window. Boundary: apply the pending plan, step changed channels through 000,
+  range writes / frame-list rebuild with the TIM8 trigger disabled (costs a
+  slot or two, outside the window), prime MAN_Ch, discard the next slot.
+- **Plans:** the AI task builds a complete `seq_plan_t` (ranges, combinations
+  A/B, guards in ADC codes, stagger slots, trip acknowledgements) and
+  `seq_plan_submit()`s it; the ISR takes it at the next boundary. Phase sums
+  come back through `seq_phase_take()` tagged with the plan generation.
+- **Trips:** ISR only: nOE = 1 immediately, key bit cleared, rewrite at the next
+  key write, nOE = 0; `trip_gen[ch]++`. The channel stays at 000 until a plan
+  carries `ack_trip[ch] == trip_gen[ch]`. The AI task does retries / LOCKED.
 
 ## Invariants
 
-### Calibration is irreversible — treat it as destructive
+### The protection ISR is safety-critical
+- It is the **only** shunt protection (no hardware limiter). Never add a path
+  that turns Q1/Q2 on outside `seq.c`, and never call `board_keys_write()`
+  from a thread once `seq_start()` ran.
+- **RAM only.** Functions reachable from the ISR carry `BOARD_RAMFUNC` /
+  `KEYS_RAMFUNC`, helpers are `BOARD_INLINE` (always_inline). No `.rodata`
+  tables, no `switch` jump tables, no libc calls: `board_io.c`, `keys.c`,
+  `seq.c`, `flash_ram.c` are built with `-fno-builtin -fno-jump-tables`.
+  Constants the ISR needs are copied to RAM (`keys_init`, `s_adc_map`). The
+  vector table is relocated to SRAM in `seq_start()`. Run the RAM check.
+- No FreeRTOS calls from the ISR (priority 0 is above
+  `configMAX_SYSCALL_INTERRUPT_PRIORITY`).
+- The settle allowance (`SETTLE_SLOTS`, 0.5 ms after a key turns on) exists
+  because the R7·C2 filter lags the node; it only suppresses a trip while
+  the pin voltage is moving back towards the allowed band.
+- Open Pt1000/KTY with Q1 on clips the ±2.56 V range, indistinguishable from
+  external voltage: guard cause `SEQ_TRIP_SCALE_Q1`; the next PRECHECK decides
+  (clean → WIRE_BREAK, not counted towards LOCKED; external → EXT_VOLTAGE,
+  counted). This deviates from a literal reading of TZ 9 on purpose.
 
-`calstore/` implements a **write-once** store: each of the 8 channel slots can
-be committed exactly once, because internal Flash can only clear bits without
-a full sector erase.
+### Watchdog (TZ 9)
+- After `wdg_tighten()` only the ISR refreshes the IWDG, and only while the AI
+  task (`seq_alive_ai`, 100 ms) and housekeeping (`seq_alive_hk`, 1 s) advance,
+  or while `seq_flash_window(true)` is open (≤ 5 s). Threads call `wdg_kick()`
+  (no-op once tight) + `seq_alive_hk()`; never `HAL_IWDG_Refresh` in new code.
+- Flash writes go through `flash_ram_write_sector()` only (never the HAL erase
+  — it polls `HAL_GetTick`, whose interrupt is masked during the erase).
 
-- Modbus writes to `540 + ch*4` are a **live preview only**, and are rejected
-  once the slot is locked.
-- Committing is `HR131 = 0xCA00 | ch`. **This is irreversible.**
-- The only undo is `calstore_erase()`, which wipes the whole sector and reverts
-  all 8 slots to neutral (gain 1.0, offset 0.0). It is gated behind two
-  factors: arm with `HR132 = 0xC1A5`, then physically confirm with a button
-  hold within 30 s (`CAL_ERASE_ARM_WINDOW_MS` / `CAL_ERASE_CONFIRM_MS`).
-- Never issue a commit or an erase while testing, and never add a code path that
-  can commit without explicit operator intent.
-
-The calibration sector is **never** erased by settings save or factory reset.
-Keep it that way.
+### Start-up order (TZ 10)
+`board_early_pins()` first in `main()` → AI task: ≥ 800 ms → ADS8688 RST +
+ranges read-back (ADC_FAIL keeps nOE = 1) → W = 0 + RCLK → nOE = 0 →
+`seq_start()` → `wdg_tighten()` → PRECHECK → staggered enable. Q1/Q2 must never
+be on before `seq_start()`.
 
 ### Single sources of truth
 - **Module identity** — `Application/fw_header/fw_header.h`:
-  `FW_PRODUCT_ID = 0x504C0804`, `FW_HW_REVISION = 0x0101`,
-  `FW_VERSION_VALUE = 0x0106`.
-- **Firmware version over Modbus** — IR120/IR121 derive from `FW_VERSION_VALUE`.
-- **Register map** — the header comment of `modbus_app.h`, mirrored by the
-  `MB_*` constants. Keep comment and constants in step.
-- **Module ID** — `MODULE_ID_08AIC = 0x08AC`, reported in IR125.
-- **Fault thresholds** — `AIC_OPEN_MA` (3.6) / `AIC_OVER_MA` (21.0) in
-  `aic_module.h`; deliberately constants, not registers.
+  `FW_PRODUCT_ID = 0x504C0807`, `FW_HW_REVISION = 0x0101`,
+  `FW_VERSION_VALUE = 0x0101`.
+- **Module ID** — `MODULE_ID_08UAI = 0x08A7` (IR125).
+- **Register map** — header comment of `modbus_app.h` + `MB_*` constants;
+  ModbusTool `build8UAI()` mirrors it.
+- **Pins / wiring tables** — `board_pins.h` only.
 
 ### Version policy — bump the minor on every change
-
 **Mandatory.** Every change to firmware behaviour ships with `FW_VERSION_VALUE`
-in `fw_header.h` incremented by one minor (`0x0106` → `0x0107`). The version is
-the operator's only way to tell which build is running on a device in the field.
-
-- Minor bump: any firmware-only change — fixes, features, register-map
-  additions, timing or conversion-maths changes.
-- Major bump: only together with a `FW_HW_REVISION` major change (MCU pinout).
-  OTA requires `fw_version` major == `hw_revision` major.
-- Pure documentation-only commits do not need a bump.
-
-Bump checklist: `FW_VERSION_VALUE` in `fw_header.h`, the version rows in
-`README.md` and `README_EN.md`.
+incremented by one minor (`0x0101` → `0x0102`). Major only with a
+`FW_HW_REVISION` major change. Documentation-only commits need no bump.
+Bump checklist: `fw_header.h`, the version rows in `README.md` and
+`README_EN.md` (image table + IR120/IR121).
 
 Changelog: every version bump also adds an entry (`DATE -- reason`, appended at the end)
 to the shared `CHANGELOG.md` / `CHANGELOG.txt` in the bootloader repo
 (`BOOTLOADER_PLCJS_ETH_MODULE_STM32F407VGT6`) - one file for all repos.
 
-### Persistence and Flash sectors
-
-| Sector | Address | Content |
-|---|---|---|
-| 10 | `0x080C0000` | Settings (`settings.c`) |
-| 11 | `0x080E0000` | Write-once calibration (`calstore.c`) |
-
-- `settings_t` layout is frozen; reordering or resizing requires bumping
-  `SETTINGS_VERSION` (currently 2, magic `0x08AC4A57`). A mismatch silently
-  reverts deployed units to factory defaults.
-- The field is named `use_dhcp` but holds a tri-state net mode (static / DHCP
-  / link-local). Kept for parity with the sibling modules.
-- **Sector 11 conflict:** the bootloader's `flash_map.h` nominally lists sector
-  11 as a third staging sector (unused — staging is sectors 8–9 only). If the
-  bootloader is ever extended to use it, 8AIC (and 4RTD) calibration is
-  destroyed.
+### Persistence
+- `settings_t` (contains `ai_ch_cfg_t ×8`, `ai_model_t`, `ai_diag_t`) layout is
+  frozen; any change needs `SETTINGS_VERSION` bumped (currently 1, magic
+  `0x08A74A57`). A mismatch reverts units to defaults **with CONFIG_ERR**;
+  a blank sector gives defaults without CONFIG_ERR.
+- Settings live in sector 10 @ `0x080C0000`. Sector 11 is unused here.
+- Modbus writes are staged in `settings_t` and applied via `ai_set_config` /
+  `ai_set_common`; `modbus_app_sanitize_staged()` runs before every save so a
+  half-written float never reaches Flash.
 
 ### Threading
-- LwIP calls must run in the tcpip thread; the live network re-apply goes through
-  `tcpip_callback()`.
-- Flash writes and resets requested over Modbus/discovery are deferred to the
-  housekeeping loop in `app_run()` via the `*_take_pending_*()` flags.
-  Calibration commits and the sector erase must run from housekeeping, never
-  from the tcpip thread.
-- Any loop blocking longer than the IWDG period must call
-  `HAL_IWDG_Refresh(&hiwdg)`.
-- All ADS1220 SPI access stays on the `AIC` acquisition task. `aic_module_tick()`
-  **blocks** for four conversions (~210 ms at 20 SPS) while polling DRDY with
-  `osDelay(1)`; the task recomputes its sleep from the measured scan time, so
-  a scan period shorter than the scan simply runs back-to-back.
-
-### Boot order (`app_run()`)
-Two ordering constraints inherited from 12DI, both load-bearing:
-- The LED task starts **before** the FACT_RES button check, otherwise the
-  factory-reset blink is silently dropped.
-- Factory reset writes Flash **before** the visual confirmation: the sector erase
-  blocks the CPU for ~1–2 s and would freeze the blink.
+- AI task (`osPriorityHigh`, 2 ms) owns the state machine; Modbus reads go
+  through `ai_get()` (critical section — masks tasks, not the ISR).
+- LwIP calls in the tcpip thread; deferred Flash writes/resets in the
+  housekeeping loop (`*_take_pending_*()`), as in the family.
 
 ## Gotchas
-
-- **Flashing the application over SWD (IDE/debugger) is not enough.** Since
-  bootloader 1.8 the boot decision CRC-checks the installed image against the
-  size/CRC in the sector-5 metadata, so an app written without matching metadata
-  leaves the board in the bootloader. OTA is the supported path; for RMA/debug use
-  `BOOTLOADER_PLCJS_ETH_MODULE_STM32F407VGT6/scripts/service_flash.ps1 -AppBin
-  <app.bin>` (writes app + metadata, never mass-erases, keeps settings and the
-  write-once calibration).
-- **`SET_NET` is probed, then saved.** `discovery.c` does not touch `settings_t`
-  until `addr_probe` reports the address free (status 0 after ~1 s, status 1 if
-  taken); re-applying the current address and retransmits of the pending request
-  are handled without a new probe. `MEMP_NUM_SYS_TIMEOUT` is 6 (DHCP + ARP + TCP +
-  reassembly + the probe timer) — keep it above the lwIP default when adding
-  timers. Boot-time stored static addresses are not probed.
-- **Settings-save bookkeeping.** `settings_save()` wraps the Flash write
-  (+ read-back) and counts successes: IR129 = saves since boot, IR130 = last
-  result (0 none, 1 ok, 2 failed). Tools use it to confirm a save; keep every
-  save going through `settings_save()`.
-- **Device name is 15 chars + NUL in a fixed 16-byte field**, and the PDP
-  IDENTIFY response is a fixed 38 bytes. Must stay identical across every module
-  variant and ModbusTool.
-- Modbus TCP serves up to 4 clients from one task (round-robin, 2 ms
-  first-byte poll per idle slot). Only when all 4 slots are busy does a new
-  connection evict the longest-silent client; a silent client is dropped after
-  30 s. Register callbacks are shared and sequential — last write wins. Needs
-  `MEMP_NUM_NETCONN/NETBUF = 8`, `MEMP_NUM_TCP_PCB = 12` in `lwipopts.h`.
-- **Slots are closed with `tcp_abort` (RST), never `netconn_close` (FIN).** A
-  FIN to a vanished peer leaves the pcb in FIN_WAIT_1 retransmitting for
-  minutes; a handful of cable pulls exhausted the pcb pool and LwIP silently
-  dropped every new SYN (PDP still answered, Modbus looked dead). The abort
-  must be **synchronous under `LOCK_TCPIP_CORE()`** — with core locking the
-  netconn API runs in the caller, so a queued `tcpip_callback()` abort lands
-  after `netconn_delete()` freed and the next accept reused the netconn.
-- The server drops clients on `g_eth_link_stable` (debounced, follows the
-  netif), not on the instantaneous `g_eth_any_link_up` (LED only): the KSZ8863
-  port blips link-down for ~10 s after a cable is plugged back.
-- **`nmbs_server_poll()` returns `NMBS_ERROR_NONE` for "nothing arrived" too.**
-  A request is counted only when a response was produced (`txbuf_len != 0`).
-  Counting the idle return as a request kept `last_activity` fresh forever
-  (idle-drop never fired), lit POLLING for any silent client and fed the
-  comms-loss timer from a silent connection.
-- STAT_LED `POLLING` is driven by request recency only (one
-  `LED_POLLING_PERIOD_MS` window), no "client connected" condition.
-- `ethernet_link_thread` never calls `HAL_ETH_Stop_IT/Start_IT` after init:
-  the MAC↔KSZ8863 port-3 MII link is internal and always up. Only the netif
-  link flag is toggled.
-- HR118 multiplexes distinct magics: `0xB00B` reboot, `0xB007` bootloader,
-  `0x8863` KSZ8863 switch reset. HR117 = `0xA5A5` save, HR119 = `0xDEAD`
-  factory reset, HR131 = calibration commit, HR132 = calibration-erase arm.
-- HR130 (on-chip temperature) is read-only despite living in holding space.
-- `float32` registers are high-word-first.
-- ADS1220 has **no fault register**: open/over-range are inferred from the
-  calibrated current and from a saturated code (`AIC_CODE_SATURATED`); a dead
-  converter is one whose DRDY never asserts or whose config readback mismatches.
-  The open check is skipped when the channel's low threshold is below 3.6 mA
-  (e.g. a 0–20 mA scale), because 0 mA is a valid input there.
-- The full scale is `V_REF / R_shunt` ≈ 22.8 mA at 89.9 Ω — the 4–20 mA
-  span sits at ~88 % of the ADC range, leaving room for the 21 mA over-range
-  limit. Do not raise the shunt above ~93 Ω or the over-range limit becomes
-  undetectable.
-- The int16 reading clamps at ±32767 so `0x8000` stays reserved for fault.
-- Production pinout (matches DOC/ETH_MODULE_8AIC_HW1.1_FW1.3.SCH, a PDF):
-  ADC0_CS PA9, ADC1_CS PD8, ADC0_DRDY PD10, ADC1_DRDY PD9, LEDs
-  PB15/PB14/PB10/PE15..PE11. RMII/ETHINT unchanged.
+- **SWD flashing alone leaves the board in the bootloader** (metadata CRC
+  check since bootloader 1.8); use the bootloader's
+  `scripts/service_flash.ps1 -AppBin <app.bin>`.
+- ADS8688 register read data is the high byte of the second received halfword
+  (`ADS_REG_DATA`). A wrong guess here shows up as ADC_FAIL at boot — check this
+  first on a new board.
+- Changing CPHA needs SPE = 0; SCLK has a weak pull-down so it stays low
+  meanwhile. CPOL is never changed.
+- Polled SPI transactions detach `RXDMAEN` (`rx_dma_detach`) so the RX ring
+  stays aligned; keep that when adding bus operations.
+- Status bit 13 INTERNAL = a forbidden key combination refused by
+  `keys_build` or a range read-back failure; it is sticky until reboot.
+- Shared gotchas (SET_NET probe, IR129/IR130 save bookkeeping, 16-byte name,
+  4-slot Modbus server with RST close, KSZ8863 warm-reset policy, HR118 magics)
+  are identical to 8AIC — see that repo's AGENTS.md.
 
 ## Linker / memory contract with the bootloader
+`FLASH` origin `0x08040000` (256 K), `RAM` length `0x1FFF0` (boot-request cell
+at `0x2001FFF0`), `.fw_header` at offset `0x200`; `fw_header_t` byte-identical
+to the bootloader's `app_validate.h`. `.RamFunc` is placed in `.data` (copied
+to RAM at start-up). OTA acceptance: `product_id` exact + `hw_revision` major.
 
-`STM32F407XX_FLASH.ld` is **not** a stock CubeMX script: `FLASH` origin is
-`0x08040000` (256 K application slot — the image only runs via the bootloader),
-and `RAM` length is `0x1FFF0` so the top 16 bytes can hold the no-init
-boot-request cell at `0x2001FFF0` (`BOOT_REQUEST_MAGIC = 0xB007CAFE`).
-`.fw_header` is padded to offset `0x200`.
-
-`fw_header_t` must stay byte-identical to `fw_header_t` in the bootloader's
-`Application/validate/app_validate.h` (28 bytes, packed). CRC32 and image size
-travel in OTA metadata, not the header.
-
-OTA acceptance: `product_id` exact match **and** `hw_revision` major byte match.
+## Open points (TZ 13)
+- Hardware acceptance (TZ 12) not run: SPI timing on the isolated side, TIM8
+  compare offsets (`TIM8_CC_*` in `seq.c`), `KEYS_WRITE_LATEST` margin, real
+  trip latency, 50 Hz rejection, accuracy.
+- R_DS1 (0.8 Ω), T_BLANK (1.5 ms), DI thresholds: TZ defaults, service
+  registers, to be confirmed on the prototype.
+- V_B of 0..1.25·VREF taken as 2.50 V (TZ); datasheet gives none explicitly.
 
 ## Multi-repo workspace
 
 | Repo | Role |
 |---|---|
-| `PLCJS_ETH_MODULE_8AIC_D4MG_...` | This module — `0x504C0804` / IR125 `0x08AC`. |
-| `PLCJS_ETH_MODULE_4RTD_D4MG_...` | 4x RTD, `0x504C0403` / `0x04D1`. Direct ancestor (ADS1220 driver, calstore, map shape). |
-| `PLCJS_ETH_MODULE_12DI_D4MG_...` | 12 discrete inputs, `0x504C1201` / `0x12D1`. Origin of the shared subsystems. |
-| `PLCJS_ETH_MODULE_12DQ_D4MG_...` | 12 discrete outputs, `0x504C1202` / `0x12D0`. |
-| `BOOTLOADER_PLCJS_ETH_MODULE_STM32F407VGT6` | Shared bootloader. Owns `flash_map.h`, `app_validate.h`, `scripts/variants.csv` (`8aic,0x504C0804,0x010101`). |
-| `PLCJS_Module_ModbusTool` | Qt6/C++17 desktop client. `build8AIC()` in `src/maps/ModuleMaps.cpp` mirrors this module's register map. |
+| `PLCJS_ETH_MODULE_8UAI_D4MG_...` | This module — `0x504C0807` / IR125 `0x08A7`. |
+| `PLCJS_ETH_MODULE_8AIC_D4MG_...` | 8x 4–20 mA, `0x504C0804` / `0x08AC`. Direct ancestor of the shared subsystems. |
+| `PLCJS_ETH_MODULE_4RTD_D4MG_...` | 4x RTD, `0x504C0403` / `0x04D1`. |
+| `PLCJS_ETH_MODULE_12DI_D4MG_...` / `12DQ_...` / `8AOC_...` | Other family members. |
+| `BOOTLOADER_PLCJS_ETH_MODULE_STM32F407VGT6` | Shared bootloader; `scripts/variants.csv` row `8uai,0x504C0807,0x010101`; shared CHANGELOG. |
+| `PLCJS_Module_ModbusTool` | Qt6 client; `build8UAI()` in `src/maps/ModuleMaps.cpp`. |
 
-**`Application/` subsystems are copy-pasted between firmware variants, not shared
-via a submodule.** A fix here is not a fix elsewhere, and vice versa.
-
-Cross-repo contracts that must change in lockstep:
-- **Wire format** (PDP frame layout, 38-byte IDENTIFY, 16-byte name) — every
-  firmware + `Pdp.cpp`.
-- **`fw_header_t` layout, `FW_HEADER_OFFSET`, `BOOT_REQUEST_FLAG_ADDR`/`MAGIC`,
-  flash map** — every firmware + bootloader + both linker scripts.
-- **product_id** — `fw_header.h` here and `scripts/variants.csv` in the
-  bootloader. `variants.csv` uses the 3-byte hw encoding `0x010101`; firmware
-  headers use the 2-byte `0x0101`.
-- **Register map changes** — `modbus_app.h` here and `build8AIC()` in
-  `ModuleMaps.cpp`, or the tool shows stale registers.
+`Application/` subsystems are copy-pasted between variants, not shared — a fix
+here is not a fix elsewhere. Lockstep contracts: PDP wire format, `fw_header_t`
+/ flash map / boot-request cell, `product_id` (+ `variants.csv`), register map
+(+ `ModuleMaps.cpp`).
 
 ## Maintaining this file
-
-`AGENTS.md` is a living document, not a one-time write. Update it **in the same
-commit** as the change it describes. Touch it when:
-
-- an invariant, gotcha or threading rule is added or changes — especially the
-  calibration write-once / sector-11 rules, which are safety-critical;
-- a module is added, removed or repurposed (`Application/` map);
-- the build procedure, toolchain or linker contract changes;
-- a register-map change alters the header comment of `modbus_app.h`;
-- `FW_VERSION_VALUE` is bumped and the version-policy text needs the new
-  example value;
-- a cross-repo contract changes (PDP wire format, `fw_header_t`, flash map,
-  `product_id`) — update the *Multi-repo* section here **and** the corresponding
-  section in the sibling repo(s).
+Update it in the same commit as the change it describes: invariants (above
+all the ISR/RAM and watchdog rules), module map, build/linker contract,
+register-map changes, version bumps, cross-repo contracts.
