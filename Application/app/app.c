@@ -4,7 +4,7 @@
   * @brief   Application orchestrator. Wires the modular drivers together,
   *          handles factory-reset, brings up the network interface in the
   *          configured mode and runs the housekeeping loop (LED ticks,
-  *          watchdog, deferred Modbus actions).
+  *          watchdog liveness, deferred Modbus actions).
   ******************************************************************************
   */
 
@@ -12,7 +12,6 @@
 #include <string.h>
 
 #include "cmsis_os.h"
-#include "iwdg.h"
 #include "lwip/api.h"
 #include "lwip/dhcp.h"
 #include "lwip/netif.h"
@@ -20,17 +19,18 @@
 #include "main.h"
 #include "stm32f4xx_hal.h"
 
+#include "ai.h"
 #include "button_module.h"
-#include "calstore.h"
 #include "discovery.h"
 #include "ksz8863.h"
 #include "led_module.h"
 #include "modbus_app.h"
 #include "modbus_tcp_server.h"
 #include "net_id.h"
-#include "aic_module.h"
+#include "seq.h"
 #include "settings.h"
 #include "temp_module.h"
+#include "wdg.h"
 
 /* The LwIP MX_LWIP_Init() exposes its struct netif so that we can override
  * the addressing after MX_LWIP_Init() has run. */
@@ -47,29 +47,44 @@ uint8_t modbus_app_take_pending_bootloader(void);
 uint8_t modbus_app_take_pending_switch_reset(void);
 uint32_t modbus_app_last_request_tick(void);
 
+/* Housekeeping liveness: before the sequencer runs this refreshes the 8 s
+ * IWDG directly; afterwards only the protection ISR may refresh it and this
+ * merely reports that the housekeeping loop is alive (see wdg.h). */
+static void hk_alive(void)
+{
+    wdg_kick();
+    seq_alive_hk();
+}
+
+/* Wait in the housekeeping context while staying alive for the watchdog. */
+static void hk_wait(uint32_t ms)
+{
+    const uint32_t deadline = HAL_GetTick() + ms;
+    while ((int32_t)(HAL_GetTick() - deadline) < 0) {
+        hk_alive();
+        osDelay(20);
+    }
+}
+
 /* ---------------------------------------------------------------------------
  * Sub-tasks
  * ------------------------------------------------------------------------- */
 
-/* Acquisition task: scans all eight current inputs once per scan period
- * (configurable, default 250 ms). One scan is four single-shot ADS1220
- * conversions (~210 ms at 20 SPS), so with short periods the task simply
- * runs back-to-back. */
-static void aic_task(void* arg)
+/* Analog task: start-up sequence (TZ section 10), then the 2 ms poll that
+ * turns the sequencer's phase sums into values and drives the channel state
+ * machine. Its liveness gates the watchdog (100 ms). */
+static void ai_task(void* arg)
 {
     (void)arg;
+    (void)ai_init();
     for (;;) {
-        const uint32_t start = osKernelGetTickCount();
-        aic_module_tick();
-        const uint32_t spent  = osKernelGetTickCount() - start;
-        const uint32_t period = aic_module_scan_period_ms();
-        osDelay((spent < period) ? (period - spent) : 1u);
+        ai_poll();
+        osDelay(2);
     }
 }
 
-/* LED task: 10 ms tick. Drives the main STAT_LED state machine and the four
- * per-channel status LEDs (solid = active, off = inactive, fast blink =
- * converter fault). */
+/* LED task: 10 ms tick. Drives the main STAT_LED state machine and the eight
+ * per-channel status LEDs. */
 static void led_task(void* arg)
 {
     (void)arg;
@@ -77,7 +92,7 @@ static void led_task(void* arg)
     uint32_t tick = osKernelGetTickCount();
     for (;;) {
         led_module_tick(period_ms);
-        aic_module_led_tick(period_ms);
+        ai_led_tick(period_ms);
         tick += period_ms;
         osDelayUntil(tick);
     }
@@ -86,8 +101,8 @@ static void led_task(void* arg)
 /* ---------------------------------------------------------------------------
  * Factory reset routine
  *
- * Order matters: commit defaults to Flash first (HAL_FLASH erase of sector 11
- * blocks the CPU and prevents the LED task from running for ~1-2 s), then
+ * Order matters: commit defaults to Flash first (the sector erase freezes all
+ * tasks for ~1-2 s, only the RAM-resident protection ISR keeps running), then
  * play the visual confirmation burst, then reboot. The LED task must already
  * be running when this routine is entered (see app_run()).
  * ------------------------------------------------------------------------- */
@@ -99,42 +114,11 @@ static void perform_factory_reset(void)
 
     /* Enter the sticky LED_STATE_FACTORY_RESET — the LED task drives the
      * configurable periodic ON/OFF blink on its 10 ms tick until the reboot
-     * below. Default cadence is 100 ms ON / 100 ms OFF, configurable via
-     * led_module_set_factory_reset_timing(). */
+     * below. */
     led_module_signal_factory_reset();
 
-    /* 3.5 s wait — long enough for the operator to see the indication at
-     * the default 5 Hz cadence (and reasonable headroom at slower settings).
-     * The LED keeps blinking the whole time. */
-    const uint32_t deadline = HAL_GetTick() + 3500u;
-    while (HAL_GetTick() < deadline) {
-        HAL_IWDG_Refresh(&hiwdg);
-        osDelay(50);
-    }
-    NVIC_SystemReset();
-}
-
-/* ---------------------------------------------------------------------------
- * Emergency calibration erase (two-factor)
- *
- * Entered only after a Modbus arm (register 132 = 0xC1A5) followed by a
- * physical button confirmation. Erases the write-once calibration sector,
- * reverting every slot to identity (gain 1.0, offset 0.0) and re-enabling
- * writes, then reboots for a clean start. The sector erase blocks the CPU for
- * ~1-2 s, so the confirmation blink is started first.
- * ------------------------------------------------------------------------- */
-static void perform_cal_erase(void)
-{
-    led_module_signal_cal_erase();
-    HAL_IWDG_Refresh(&hiwdg);
-
-    (void)calstore_erase();
-
-    const uint32_t deadline = HAL_GetTick() + 1500u;
-    while (HAL_GetTick() < deadline) {
-        HAL_IWDG_Refresh(&hiwdg);
-        osDelay(50);
-    }
+    /* 3.5 s wait — long enough for the operator to see the indication. */
+    hk_wait(3500u);
     NVIC_SystemReset();
 }
 
@@ -201,6 +185,21 @@ static void apply_network_config_tcpip(void* arg)
     apply_network_config();
 }
 
+/* Persist the settings. Staged analog parameters that are still inconsistent
+ * (e.g. half of a float written by FC06) are replaced by the configuration in
+ * force first, so an invalid record never reaches Flash. */
+static void save_settings(void)
+{
+    hk_alive();
+    modbus_app_sanitize_staged();
+    settings_save();
+    hk_alive();
+    /* Apply network settings live so an IP / DHCP change takes effect
+     * immediately, without a reboot. Runs in the tcpip thread for LwIP
+     * thread-safety; a no-op if the address is unchanged. */
+    tcpip_callback(apply_network_config_tcpip, NULL);
+}
+
 /* ---------------------------------------------------------------------------
  * Housekeeping
  * ------------------------------------------------------------------------- */
@@ -233,15 +232,10 @@ void app_run(void)
     settings_init();
     settings_t* s = settings_get();
 
-    /* Load write-once calibration coefficients from their dedicated Flash
-     * sector. Un-committed (channel, range) pairs default to identity
-     * (gain 1.0, offset 0.0). Survives factory reset. */
-    calstore_init();
-
     /* Initialise the LED module and spawn its task BEFORE the button check.
-     * The factory-reset burst (10 short blinks) is driven by led_module_tick()
-     * which runs from led_task; if the task is not yet running, the burst is
-     * silently dropped. */
+     * The factory-reset burst is driven by led_module_tick() which runs from
+     * led_task; if the task is not yet running, the burst is silently
+     * dropped. */
     led_module_init((uint8_t)s->led_mode);
     const osThreadAttr_t led_attr_early = {
         .name = "LED", .stack_size = 256, .priority = osPriorityLow
@@ -255,10 +249,17 @@ void app_run(void)
         /* Not reached. */
     }
 
-    /* Initialise the remaining hardware drivers. */
-    aic_module_init();
+    /* Analog front-end: the task runs the start-up sequence itself (it waits
+     * for 800 ms after reset, then arms the sequencer and the 25 ms watchdog)
+     * while the network comes up here. */
+    const osThreadAttr_t ai_attr = {
+        .name = "AI", .stack_size = 1536, .priority = osPriorityHigh
+    };
+    osThreadNew(ai_task, NULL, &ai_attr);
+
     temp_module_init();
     modbus_app_init();
+    hk_alive();
 
     /* Apply network configuration (static or DHCP). */
     apply_network_config();
@@ -267,14 +268,7 @@ void app_run(void)
      * called it from low_level_init()), so SMI/MIIM access is available.
      * Ensure KSZ8863 port 3 is in RMII mode (bit 6 of Global Control 4). */
     ksz8863_ensure_rmii_port3();
-
-    /* Spawn the current-input acquisition task. The LED task was started earlier so that
-     * the factory-reset burst is visible during the boot-time button-hold
-     * path (see above). */
-    const osThreadAttr_t aic_attr  = {
-        .name = "AIC", .stack_size = 768, .priority = osPriorityHigh
-    };
-    osThreadNew(aic_task, NULL, &aic_attr);
+    hk_alive();
 
     /* Spawn Modbus TCP server. */
     modbus_tcp_server_start();
@@ -283,41 +277,21 @@ void app_run(void)
      * addressed by MAC even in the factory link-local state. */
     discovery_init();
 
-    /* Housekeeping loop: feeds the watchdog, processes deferred actions and
+    /* Housekeeping loop: reports liveness, processes deferred actions and
      * keeps the LED state in sync with the Modbus traffic. */
     uint32_t tick = osKernelGetTickCount();
     for (;;) {
-        HAL_IWDG_Refresh(&hiwdg);
-
-        /* Two-factor emergency calibration erase: a Modbus arm plus a physical
-         * button confirmation within the arming window. While armed, the LED
-         * shows a distinct pattern instead of the traffic state. */
-        if (modbus_app_cal_erase_armed()) {
-            led_module_set_state(LED_STATE_CAL_ARMED);
-            if (button_is_pressed() && button_wait_held(CAL_ERASE_CONFIRM_MS)) {
-                modbus_app_clear_cal_erase_arm();
-                perform_cal_erase();
-                /* Not reached. */
-            }
-        } else {
-            update_led_state_from_traffic();
-        }
+        hk_alive();
+        update_led_state_from_traffic();
 
         if (modbus_app_take_pending_save()) {
-            HAL_IWDG_Refresh(&hiwdg);
-            settings_save();
-            /* Apply network settings live so an IP / DHCP change takes effect
-             * immediately, without a reboot. Runs in the tcpip thread for
-             * LwIP thread-safety; a no-op if the address is unchanged. */
-            tcpip_callback(apply_network_config_tcpip, NULL);
+            save_settings();
         }
 
         /* Discovery-protocol deferred actions (Flash write / reset run here,
          * outside the tcpip thread that received the UDP request). */
         if (discovery_take_pending_save()) {
-            HAL_IWDG_Refresh(&hiwdg);
-            settings_save();
-            tcpip_callback(apply_network_config_tcpip, NULL);
+            save_settings();
         }
         if (discovery_take_pending_factory()) {
             perform_factory_reset();
@@ -342,19 +316,11 @@ void app_run(void)
              * shared magic into the no-init RAM cell, then reset. The cell
              * survives a warm reset; the bootloader consumes it on entry. */
             *(volatile uint32_t *)BOOT_REQUEST_FLAG_ADDR = BOOT_REQUEST_MAGIC;
-            const uint32_t bl_deadline = HAL_GetTick() + 200u;
-            while (HAL_GetTick() < bl_deadline) {
-                HAL_IWDG_Refresh(&hiwdg);
-                osDelay(20);
-            }
+            hk_wait(200u);
             NVIC_SystemReset();
         }
         if (modbus_app_take_pending_reboot()) {
-            const uint32_t deadline = HAL_GetTick() + 200u;
-            while (HAL_GetTick() < deadline) {
-                HAL_IWDG_Refresh(&hiwdg);
-                osDelay(20);
-            }
+            hk_wait(200u);
             NVIC_SystemReset();
         }
 

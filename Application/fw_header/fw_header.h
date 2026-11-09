@@ -55,13 +55,13 @@ typedef struct __attribute__((packed)) {
  * May still be overridden at build time via -DFW_PRODUCT_ID /
  * -DFW_HW_REVISION / -DFW_VERSION_VALUE (guarded below). Bump fw_version here. */
 #ifndef FW_PRODUCT_ID
-#define FW_PRODUCT_ID    0x504C0804u  /* PL, 8ch, AI current */
+#define FW_PRODUCT_ID    0x504C0807u  /* PL, 8ch, universal AI (8UAI) */
 #endif
 #ifndef FW_HW_REVISION
 #define FW_HW_REVISION   0x0101u  /* hw:01.01 */
 #endif
 #ifndef FW_VERSION_VALUE
-#define FW_VERSION_VALUE 0x0106u  /* fw:01.06 */
+#define FW_VERSION_VALUE 0x0101u  /* fw:01.01 */
 #endif
 
 /** The single header instance placed in the .fw_header linker section. */

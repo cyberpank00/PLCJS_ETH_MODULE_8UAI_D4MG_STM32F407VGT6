@@ -19,7 +19,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Set the project name
-set(CMAKE_PROJECT_NAME PLCJS_ETH_MODULE_8AIC_D4MG_STM32F407VGT6)
+set(CMAKE_PROJECT_NAME PLCJS_ETH_MODULE_8UAI_D4MG_STM32F407VGT6)
 
 # Enable compile command to ease indexing with e.g. clangd
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
@@ -65,16 +65,32 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Application/discovery/discovery.c
     Application/addr_probe/addr_probe.c
     Application/settings/settings.c
-    Application/calstore/calstore.c
     Application/modbus/modbus_app.c
     Application/modbus/modbus_tcp_server.c
     Application/fw_header/fw_header.c
-    # Analog current-input front-end
-    Application/spi/spi_bus.c
-    Application/ads1220/ads1220.c
-    Application/aic/aic_module.c
+    # Universal analog front-end (ADS8688 + 595 key chain)
+    Application/board/board_pins.c
+    Application/board/board_io.c
+    Application/ads8688/ads8688.c
+    Application/keys/keys.c
+    Application/seq/seq.c
+    Application/ai/ai_math.c
+    Application/ai/ai.c
+    Application/wdg/wdg.c
+    Application/flash_ram/flash_ram.c
     # Third-party
     Application/third_party/nanomodbus/nanomodbus.c
+)
+
+# Code reachable from the protection ISR runs from RAM while Flash may be
+# busy erasing: no library calls (memcpy/memset idioms) and no jump tables
+# in .rodata may be generated for these files.
+set_source_files_properties(
+    Application/board/board_io.c
+    Application/keys/keys.c
+    Application/seq/seq.c
+    Application/flash_ram/flash_ram.c
+    PROPERTIES COMPILE_OPTIONS "-fno-builtin;-fno-jump-tables"
 )
 
 # Add include paths
@@ -88,12 +104,15 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     Application/discovery
     Application/addr_probe
     Application/settings
-    Application/calstore
     Application/modbus
     Application/fw_header
-    Application/spi
-    Application/ads1220
-    Application/aic
+    Application/board
+    Application/ads8688
+    Application/keys
+    Application/seq
+    Application/ai
+    Application/wdg
+    Application/flash_ram
     Application/third_party/nanomodbus
 )
 

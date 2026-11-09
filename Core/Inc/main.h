@@ -66,37 +66,8 @@ void Error_Handler(void);
 #define FACT_RES_Pin GPIO_PIN_10
 #define FACT_RES_GPIO_Port GPIOE
 
-/* ---- 8AIC analog board (ADS1220 x2, 4 single-ended inputs each) --------- */
-/* SPI1: SCLK = PA5, MISO = PA6, MOSI = PB5 (all AF5). Configured in spi_bus.c. */
-
-/* Per-converter chip-select (active-low, idle high) and DRDY (active-low),
- * both through the digital isolators. ADC0 serves AI0..AI3, ADC1 AI4..AI7. */
-#define ADC0_CS_Pin         GPIO_PIN_9
-#define ADC0_CS_GPIO_Port   GPIOA
-#define ADC1_CS_Pin         GPIO_PIN_8
-#define ADC1_CS_GPIO_Port   GPIOD
-#define ADC0_DRDY_Pin       GPIO_PIN_10
-#define ADC0_DRDY_GPIO_Port GPIOD
-#define ADC1_DRDY_Pin       GPIO_PIN_9
-#define ADC1_DRDY_GPIO_Port GPIOD
-
-/* Per-channel status LED (active-high). */
-#define AI0_STAT_Pin        GPIO_PIN_15
-#define AI0_STAT_GPIO_Port  GPIOB
-#define AI1_STAT_Pin        GPIO_PIN_14
-#define AI1_STAT_GPIO_Port  GPIOB
-#define AI2_STAT_Pin        GPIO_PIN_10
-#define AI2_STAT_GPIO_Port  GPIOB
-#define AI3_STAT_Pin        GPIO_PIN_15
-#define AI3_STAT_GPIO_Port  GPIOE
-#define AI4_STAT_Pin        GPIO_PIN_14
-#define AI4_STAT_GPIO_Port  GPIOE
-#define AI5_STAT_Pin        GPIO_PIN_13
-#define AI5_STAT_GPIO_Port  GPIOE
-#define AI6_STAT_Pin        GPIO_PIN_12
-#define AI6_STAT_GPIO_Port  GPIOE
-#define AI7_STAT_Pin        GPIO_PIN_11
-#define AI7_STAT_GPIO_Port  GPIOE
+/* 8UAI analog front-end pins (SPI1, CS_ADC, nOE, RCLK) and the channel
+ * status LEDs are defined only in Application/board/board_pins.h. */
 
 /* USER CODE BEGIN Private defines */
 

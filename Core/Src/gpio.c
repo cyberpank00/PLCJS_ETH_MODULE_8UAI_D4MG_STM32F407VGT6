@@ -61,15 +61,6 @@ void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(STAT_LED_GPIO_Port, STAT_LED_Pin, GPIO_PIN_RESET);
 
-  /* ADS1220 chip-selects idle high (deselected). */
-  HAL_GPIO_WritePin(ADC0_CS_GPIO_Port, ADC0_CS_Pin, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(ADC1_CS_GPIO_Port, ADC1_CS_Pin, GPIO_PIN_SET);
-
-  /* Status LEDs default low. */
-  HAL_GPIO_WritePin(GPIOB, AI0_STAT_Pin|AI1_STAT_Pin|AI2_STAT_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOE, AI3_STAT_Pin|AI4_STAT_Pin|AI5_STAT_Pin|AI6_STAT_Pin|AI7_STAT_Pin,
-                    GPIO_PIN_RESET);
-
   /*Configure GPIO pin : ETHINT_Pin */
   GPIO_InitStruct.Pin = ETHINT_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
@@ -96,35 +87,8 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(FACT_RES_GPIO_Port, &GPIO_InitStruct);
 
-  /* ADS1220 chip-selects (production pinout): ADC0_CS = PA9, ADC1_CS = PD8. */
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-
-  GPIO_InitStruct.Pin = ADC0_CS_Pin;
-  HAL_GPIO_Init(ADC0_CS_GPIO_Port, &GPIO_InitStruct);
-
-  GPIO_InitStruct.Pin = ADC1_CS_Pin;
-  HAL_GPIO_Init(ADC1_CS_GPIO_Port, &GPIO_InitStruct);
-
-  /* ADS1220 DRDY inputs (active-low, driven through the isolators): PD10, PD9. */
-  GPIO_InitStruct.Pin = ADC0_DRDY_Pin|ADC1_DRDY_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-
-  /* Channel status LEDs: AI0..AI2 on port B (PB15, PB14, PB10), AI3..AI7 on
-   * port E (PE15..PE11). */
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-
-  GPIO_InitStruct.Pin = AI0_STAT_Pin|AI1_STAT_Pin|AI2_STAT_Pin;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  GPIO_InitStruct.Pin = AI3_STAT_Pin|AI4_STAT_Pin|AI5_STAT_Pin|AI6_STAT_Pin|AI7_STAT_Pin;
-  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
-
+  /* 8UAI analog pins (nOE/CS_ADC/RCLK/SPI1) and the channel LEDs are set up
+   * by Application/board (board_early_pins() runs first thing in main()). */
 }
 
 /* USER CODE BEGIN 2 */
