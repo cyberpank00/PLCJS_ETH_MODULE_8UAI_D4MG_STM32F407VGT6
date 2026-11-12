@@ -264,14 +264,46 @@ static void test_keys(void)
     const uint32_t w = keys_build(combo, &bad);
     CHECK(bad == 0x70u);
     CHECK(combo[4] == 0u && combo[5] == 0u && combo[6] == 0u && combo[0] == AI_KEY_Q1);
-    /* ch0 Q1 -> W0, ch1 Q2 -> W17, ch2 PD -> W10, ch7 Q1 -> W7. */
-    CHECK(w == ((1u << 0) | (1u << 17) | (1u << 10) | (1u << 7)));
+    /* Schematic of 12.11.2026: AI0 Q1 = U12 DRAIN7 (W15), AI1 Q2 = U13 Q2
+     * (W18), AI2 PD = U12 DRAIN2 (W10), AI7 Q1 = U11 DRAIN0 (W0). */
+    CHECK(w == ((1u << 15) | (1u << 18) | (1u << 10) | (1u << 0)));
     CHECK(keys_combo_forbidden(0x08u));
+
+    /* Each key of each channel drives exactly its own bit. */
     for (uint8_t ch = 0; ch < 8; ch++) {
         uint8_t one[8] = { 0 };
+        one[ch] = AI_KEY_Q1;
+        CHECK(keys_build(one, &bad) == (1u << BOARD_KEY_MAP[ch].q1) && bad == 0u);
         one[ch] = AI_KEY_Q2;
-        CHECK(keys_build(one, &bad) == (1u << (16 + ch)) && bad == 0u);
+        CHECK(keys_build(one, &bad) == (1u << BOARD_KEY_MAP[ch].q2) && bad == 0u);
+        one[ch] = AI_KEY_PD;
+        CHECK(keys_build(one, &bad) == (1u << BOARD_KEY_MAP[ch].pd) && bad == 0u);
     }
+
+    /* Key map integrity: all 24 outputs used exactly once, Q1/PD on the two
+     * TPIC6C595 (W0..15), Q2 on the 74HC595 (W16..23). */
+    uint32_t used = 0;
+    int dup = 0;
+    for (uint8_t ch = 0; ch < 8; ch++) {
+        const uint8_t b[3] = { BOARD_KEY_MAP[ch].q1, BOARD_KEY_MAP[ch].q2, BOARD_KEY_MAP[ch].pd };
+        for (int i = 0; i < 3; i++) {
+            if (b[i] > 23u || (used & (1u << b[i])) != 0u) { dup++; }
+            else { used |= 1u << b[i]; }
+        }
+        CHECK(BOARD_KEY_MAP[ch].q1 <= 15u && BOARD_KEY_MAP[ch].pd <= 15u);
+        CHECK(BOARD_KEY_MAP[ch].q2 >= 16u && BOARD_KEY_MAP[ch].q2 <= 23u);
+    }
+    CHECK(dup == 0 && used == 0x00FFFFFFu);
+
+    /* All channels on with their own combination: the word is the OR. */
+    uint8_t all[8] = { AI_KEY_Q1, AI_KEY_Q2, AI_KEY_PD, AI_KEY_Q1,
+                       AI_KEY_Q2, AI_KEY_PD, AI_KEY_Q1, AI_KEY_Q2 };
+    uint32_t expect = 0;
+    for (uint8_t ch = 0; ch < 8; ch++) {
+        expect |= 1u << ((all[ch] == AI_KEY_Q1) ? BOARD_KEY_MAP[ch].q1 :
+                         (all[ch] == AI_KEY_Q2) ? BOARD_KEY_MAP[ch].q2 : BOARD_KEY_MAP[ch].pd);
+    }
+    CHECK(keys_build(all, &bad) == expect && bad == 0u);
     /* ADC map is a permutation of 0..7. */
     uint8_t seen = 0;
     for (uint8_t i = 0; i < 8; i++) { seen |= (uint8_t)(1u << BOARD_ADC_MAP[i]); }

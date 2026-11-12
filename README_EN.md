@@ -21,7 +21,7 @@ fw 1.6; the analog path is new.
 |---|---|
 | MCU | `STM32F407VGT6` at **160 MHz** (APB2 80 MHz → SPI exactly 10 MHz) |
 | ADC | `ADS8688`, manual channel selection, 4.096 V reference |
-| Keys | U11 `TPIC6C595` (Q1), U12 `TPIC6C595` (PD), U13 `74HC595` (Q2); `/OE` = nOE OR `MCP101` supervisor |
+| Keys | U11, U12 `TPIC6C595` (Q1 and PD, outputs mixed by the layout), U13 `74HC595` (Q2); `/OE` = nOE OR `MCP101` supervisor; mapping in `BOARD_KEY_MAP` |
 | Watchdog | `IWDG`: 8 s until the analog start-up, then 25 ms, refreshed only by the protection ISR |
 
 Pins (only in `Application/board/board_pins.h`): SPI1 PA5/PA6/PB5, CS_ADC PA9,
@@ -72,7 +72,7 @@ float32 = 2 registers, high word first.
   Hz, `134` T_BLANK µs, `131` commands (`0xA100|ch` UNLOCK, `0xA200|ch` RESTART,
   `0xA300` APPLY).
 - Input `300..363`: value, raw, status, update counter, trips, state.
-- IR120 / IR121 firmware version major / minor (**1 / 1**), IR125 module id
+- IR120 / IR121 firmware version major / minor (**1 / 2**), IR125 module id
   `0x08A7`, IR127 module flags, IR128 samples per phase, IR129/130 save count /
   result.
 
@@ -86,7 +86,7 @@ Status bits: 0 NO_DATA, 1 OVERRANGE, 2 UNDERRANGE, 3 WIRE_BREAK, 4 SHORT,
 |---|---|
 | `product_id` | `0x504C0807` |
 | `hw_revision` | `0x0101` |
-| `fw_version` | `0x0101` (fw 1.1) |
+| `fw_version` | `0x0102` (fw 1.2) |
 
 Settings: sector 10 (`0x080C0000`), `SETTINGS_MAGIC = 0x08A74A57`, version 1.
 Sector 11 is unused.

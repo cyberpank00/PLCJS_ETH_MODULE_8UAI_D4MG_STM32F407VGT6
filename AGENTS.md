@@ -149,15 +149,19 @@ be on before `seq_start()`.
 ### Single sources of truth
 - **Module identity** — `Application/fw_header/fw_header.h`:
   `FW_PRODUCT_ID = 0x504C0807`, `FW_HW_REVISION = 0x0101`,
-  `FW_VERSION_VALUE = 0x0101`.
+  `FW_VERSION_VALUE = 0x0102`.
 - **Module ID** — `MODULE_ID_08UAI = 0x08A7` (IR125).
 - **Register map** — header comment of `modbus_app.h` + `MB_*` constants;
   ModbusTool `build8UAI()` mirrors it.
-- **Pins / wiring tables** — `board_pins.h` only.
+- **Pins / wiring tables** — `board_pins.h` only. The key outputs are pin-swapped
+  across U11/U12 (Q1 and PD mixed) and within U13 (schematic of 12.11.2026);
+  `BOARD_KEY_MAP` holds any bit 0..23 per key, and a host test checks that
+  every bit is used once (Q1/PD in 0..15, Q2 in 16..23). A new layout =
+  edit that table + the expectations in `test_keys()`.
 
 ### Version policy — bump the minor on every change
 **Mandatory.** Every change to firmware behaviour ships with `FW_VERSION_VALUE`
-incremented by one minor (`0x0101` → `0x0102`). Major only with a
+incremented by one minor (`0x0102` → `0x0103`). Major only with a
 `FW_HW_REVISION` major change. Documentation-only commits need no bump.
 Bump checklist: `fw_header.h`, the version rows in `README.md` and
 `README_EN.md` (image table + IR120/IR121).

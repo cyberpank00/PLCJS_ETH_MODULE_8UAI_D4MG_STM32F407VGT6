@@ -3,12 +3,12 @@
   * @file    board_pins.h
   * @brief   8UAI board file — the ONLY place that knows MCU pins, the SPI
   *          instance and the board wiring tables of the analog front-end
-  *          (TZ section 1). Source: schematic PLCJS_ETH_MODULE_8UAI_D4MG
-  *          (beta, 09.11.2026). Verified against DOC/SCH_MAIN_BOARD_8UAI.pdf
-  *          (MCU sheet 6: PA5/PA6/PB5, PA8 OE_MCU, PA9 ADC_CS, PC8 RCLK,
-  *          AIx_STAT; ADC sheet 3: AIx_P_ADC -> AIN_nP, SDI -> U11 -> U12 ->
-  *          U13, DRAINk/Qk -> SRC_k/LOAD_k/SH_k). Re-check whenever the
-  *          layout changes.
+  *          (TZ section 1). Verified against DOC/SCH_MAIN_BOARD_8UAI.pdf,
+  *          revision of 12.11.2026 (key outputs pin-swapped during layout):
+  *          MCU sheet 6: PA5/PA6/PB5, PA8 OE_MCU, PA9 ADC_CS, PC8 RCLK,
+  *          AIx_STAT; sheet 3: AIx_P_ADC -> AIN_nP, SDI -> U11 -> U12 -> U13,
+  *          DRAIN/Q -> SRC_k/LOAD_k/SH_k per BOARD_KEY_MAP below. Re-check
+  *          whenever the layout changes.
   *
   *  Isolated-side signals (through U6 CA-IS3740HB / U15 CA-IS3721LS):
   *    SCLK  PA5  SPI1_SCK  (AF5)   idle 0 (CPOL = 0 always)
@@ -61,10 +61,17 @@ extern "C" {
 static const uint8_t BOARD_ADC_MAP[8] = { 5u, 4u, 3u, 2u, 0u, 1u, 7u, 6u };
 
 /* ---- Key bits in the 24-bit chain word W (TZ section 5) -------------------
- * W[23:16] -> U13 74HC595 Qk     -> Q2 (shunt)      of input k (sent first)
- * W[15:8]  -> U12 TPIC6C595 DRk  -> PD (pull-down)  of input k
- * W[7:0]   -> U11 TPIC6C595 DRk  -> Q1 (excitation) of input k (sent last)
- * "1" = key on in all three registers. */
+ * Chain SDI -> U11 -> U12 -> U13, W sent MSB first:
+ *   W[23:16] -> U13 74HC595   Q0..Q7     (sent first)  — Q2 keys (SH_k)
+ *   W[15:8]  -> U12 TPIC6C595 DRAIN0..7                — Q1/PD keys (SRC_k/LOAD_k)
+ *   W[7:0]   -> U11 TPIC6C595 DRAIN0..7  (sent last)   — Q1/PD keys (SRC_k/LOAD_k)
+ * "1" = key on in all three registers. After layout pin swapping
+ * (schematic of 12.11.2026) the outputs are:
+ *   U11 DRAIN0..7: SRC_7 LOAD_7 SRC_6 LOAD_6 LOAD_4 SRC_4 LOAD_5 SRC_5
+ *   U12 DRAIN0..7: SRC_3 LOAD_3 LOAD_2 SRC_2 LOAD_1 SRC_1 LOAD_0 SRC_0
+ *   U13 Q0..Q7:    SH_7  SH_0   SH_1   SH_2  SH_3   SH_4  SH_6   SH_5
+ * Every bit 0..23 is used exactly once; Q1/PD in 0..15, Q2 in 16..23
+ * (checked by the host tests). */
 typedef struct {
     uint8_t q1;
     uint8_t q2;
@@ -72,8 +79,15 @@ typedef struct {
 } board_key_bits_t;
 
 static const board_key_bits_t BOARD_KEY_MAP[8] = {
-    { 0u, 16u,  8u }, { 1u, 17u,  9u }, { 2u, 18u, 10u }, { 3u, 19u, 11u },
-    { 4u, 20u, 12u }, { 5u, 21u, 13u }, { 6u, 22u, 14u }, { 7u, 23u, 15u },
+    /*        Q1   Q2   PD */
+    /* AI0 */ { 15u, 17u, 14u },
+    /* AI1 */ { 13u, 18u, 12u },
+    /* AI2 */ { 11u, 19u, 10u },
+    /* AI3 */ {  8u, 20u,  9u },
+    /* AI4 */ {  5u, 21u,  4u },
+    /* AI5 */ {  7u, 23u,  6u },
+    /* AI6 */ {  2u, 22u,  3u },
+    /* AI7 */ {  0u, 16u,  1u },
 };
 
 /* ---- Channel status LEDs ---------------------------------------------------- */
